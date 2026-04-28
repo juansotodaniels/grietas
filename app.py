@@ -9,18 +9,16 @@ import io
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(layout="wide", page_title="Analizador MEL - Digitalización")
 
-# --- CONSTANTES TÉCNICAS (Tu código original) ---
-ANCHO_BERMA = 2.0
-ANCHO_PISTA = 3.5
-ANCHO_TOTAL = ANCHO_BERMA + ANCHO_PISTA + ANCHO_PISTA + ANCHO_BERMA # 11 m
-ANG_TOL = 20.0
-EJE_TOL_M = 0.2
-MIN_YELLOW_PIXELS = 150
-MIN_YELLOW_RATIO = 0.0005
-S_MIN_COLOR = 0.25
-V_MIN_COLOR = 0.15
-BLUE_H_MIN = 200.0 / 360.0
-BLUE_H_MAX = 260.0 / 360.0
+# --- CONSTANTES TÉCNICAS (Tu original) ---
+ANCHO_BERMA, ANCHO_PISTA = 2.0, 3.5
+ANCHO_TOTAL = 11.0 # 2+3.5+3.5+2
+ANG_TOL, EJE_TOL_M = 20.0, 0.2
+MIN_YELLOW_PIXELS, MIN_YELLOW_RATIO = 150, 0.0005
+S_MIN_COLOR, V_MIN_COLOR = 0.25, 0.15
+BLUE_H_MIN, BLUE_H_MAX = 200.0/360.0, 260.0/360.0
+S_TRANSVERSAL, S_LONGITUDINAL, S_TODAS = 0.005368, 0.13644, 0.13655
+CENTER_OFFSET, PINK_LEFT_OFFSET, PINK_RIGHT_OFFSET = 220, 340, 620
+HUELLA_MIN_FRAC = 0.75
 
 COLOR_MAP = {
     "longitudinal": (255, 0, 0, 160),
@@ -29,21 +27,7 @@ COLOR_MAP = {
     "en_todas_direcciones": (200, 0, 200, 160)
 }
 
-S_TRANSVERSAL = 0.005368
-S_LONGITUDINAL = 0.13644
-S_TODAS = 0.13655
-
-CENTER_OFFSET = 220
-PINK_LEFT_OFFSET = 340
-PINK_RIGHT_OFFSET = 620
-
-HUELLA_P2_LEFT_OFFSET, HUELLA_P2_LEFT_WIDTH = -100, 100
-HUELLA_P2_RIGHT_OFFSET, HUELLA_P2_RIGHT_WIDTH = 100, 85
-HUELLA_P1_LEFT_OFFSET, HUELLA_P1_LEFT_WIDTH = -120, 100
-HUELLA_P1_RIGHT_OFFSET, HUELLA_P1_RIGHT_WIDTH = 120, 100
-HUELLA_MIN_FRAC = 0.75
-
-# --- FUNCIONES DE MOTOR ORIGINAL (Sin cambios en lógica) ---
+# --- FUNCIONES CORE ---
 
 def yellow_mask_rgb_hsv(arr):
     rgb = arr.astype(np.float32) / 255.0
@@ -51,8 +35,7 @@ def yellow_mask_rgb_hsv(arr):
     H, S, V = hsv[..., 0], hsv[..., 1], hsv[..., 2]
     mask = (V >= V_MIN_COLOR) & (S >= S_MIN_COLOR) & ~((H >= BLUE_H_MIN) & (H <= BLUE_H_MAX))
     mask = ndi.binary_closing(mask, structure=np.ones((3, 3)))
-    mask = ndi.binary_opening(mask, structure=np.ones((2, 2)))
-    return mask
+    return ndi.binary_opening(mask, structure=np.ones((2, 2)))
 
 def compute_zone_bounds(W):
     x_center_shifted = (W / 2.0) + CENTER_OFFSET
@@ -64,24 +47,23 @@ def compute_zone_bounds(W):
         c = center_p + off
         return int(round(max(x_min, min(x_max, c - width/2.0)))), int(round(max(x_min, min(x_max, c + width/2.0))))
 
-    h_p2 = (*get_h((x1+x2)/2.0, HUELLA_P2_LEFT_OFFSET, HUELLA_P2_LEFT_WIDTH, x1, x2),
-            *get_h((x1+x2)/2.0, HUELLA_P2_RIGHT_OFFSET, HUELLA_P2_RIGHT_WIDTH, x1, x2))
-    h_p1 = (*get_h((x2+x3)/2.0, HUELLA_P1_LEFT_OFFSET, HUELLA_P1_LEFT_WIDTH, x2, x3),
-            *get_h((x2+x3)/2.0, HUELLA_P1_RIGHT_OFFSET, HUELLA_P1_RIGHT_WIDTH, x2, x3))
+    h_p2 = (*get_h((x1+x2)/2.0, -100, 100, x1, x2), *get_h((x1+x2)/2.0, 100, 85, x1, x2))
+    h_p1 = (*get_h((x2+x3)/2.0, -120, 100, x2, x3), *get_h((x2+x3)/2.0, 120, 100, x2, x3))
     return (0, x1, x2, x3, W), h_p2, h_p1
 
 def classify_component(xs, ys, W):
     x_c, y_c = xs.mean(), ys.mean()
     Xpx = np.vstack([xs - x_c, ys - y_c])
-    evals, evecs = np.linalg.eig(np.cov(Xpx))
+    cov = np.cov(Xpx)
+    if cov.ndim < 2: return "desconocido", 0, "Fuera", x_c, y_c
+    evals, evecs = np.linalg.eig(cov)
     major = evecs[:, np.argmax(evals)]
     ang = abs(np.degrees(np.arctan2(major[1], major[0]))) % 180.0
     
     (x0, x1, x2, x3, x4), _, _ = compute_zone_bounds(W)
     zona = "Berma Izq" if x_c < x1 else "P2" if x_c < x2 else "P1" if x_c < x3 else "Berma Der"
     
-    # Lógica de distancia al eje de tu código
-    x_p2_eje = x1 + (ANCHO_PISTA) * ((x3-x1)/7.0) # Simplificación de tu px_per_m
+    x_p2_eje = x1 + (ANCHO_BERMA + ANCHO_PISTA) * ((x3-x1)/ANCHO_TOTAL)
     dist_min_m = float(np.min(np.abs(xs - x_p2_eje))) * S_LONGITUDINAL
 
     if abs(ang - 90.0) <= ANG_TOL:
@@ -94,98 +76,95 @@ def classify_component(xs, ys, W):
     Lpx = float(np.ptp(major[0]*(xs-x_c) + major[1]*(ys-y_c)))
     return clase, Lpx, zona, x_c, y_c
 
-def build_zone_maps(W, H):
-    full = np.full((H, W), -1, dtype=np.int8)
-    (x0, x1, x2, x3, x4), hp2, hp1 = compute_zone_bounds(W)
-    full[:, x0:x1], full[:, x1:x2], full[:, x2:x3], full[:, x3:x4] = 0, 1, 2, 3
-    if hp2[1]>hp2[0]: full[:, hp2[0]:hp2[1]] = 4
-    if hp2[3]>hp2[2]: full[:, hp2[2]:hp2[3]] = 4
-    if hp1[1]>hp1[0]: full[:, hp1[0]:hp1[1]] = 5
-    if hp1[3]>hp1[2]: full[:, hp1[2]:hp1[3]] = 5
-    return full
-
-def annotate_image(img_pil, labels, df_comp):
+def annotate_image_final(img_pil, labels, df_comp):
     base = img_pil.convert("RGBA")
     W, H = base.size
-    overlay = Image.new("RGBA", (W, H), (0,0,0,0))
-    ov_arr = np.array(overlay)
-    for _, r in df_comp.iterrows():
-        ov_arr[labels == r["id"]] = COLOR_MAP.get(r["clase"], (0,0,0,160))
+    zone_ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    zdraw = ImageDraw.Draw(zone_ov)
+    (x0, x1, x2, x3, x4), hp2, hp1 = compute_zone_bounds(W)
     
-    combined = Image.alpha_composite(base, Image.fromarray(ov_arr))
-    draw = ImageDraw.Draw(combined)
-    try: font = ImageFont.truetype("DejaVuSans.ttf", 14) # Tamaño 14 solicitado
+    cols = {"BI": (255,255,0,70), "P2": (0,200,255,70), "P1": (255,150,255,70), "BD": (150,230,0,70), "H": (255,0,0,100)}
+    if x1>x0: zdraw.rectangle([x0,0,x1,H], fill=cols["BI"])
+    if x2>x1: zdraw.rectangle([x1,0,x2,H], fill=cols["P2"])
+    if x3>x2: zdraw.rectangle([x2,0,x3,H], fill=cols["P1"])
+    if x4>x3: zdraw.rectangle([x3,0,x4,H], fill=cols["BD"])
+    # Huellas
+    for h in [hp2, hp1]:
+        if h[1]>h[0]: zdraw.rectangle([h[0],0,h[1],H], fill=(255,0,0,100))
+        if h[3]>h[2]: zdraw.rectangle([h[2],0,h[3],H], fill=(255,0,0,100))
+
+    crack_ov = np.zeros((H, W, 4), dtype=np.uint8)
+    for _, r in df_comp.iterrows():
+        crack_ov[labels == r["id"]] = COLOR_MAP.get(r["clase"], (0,0,0,160))
+    
+    out = Image.alpha_composite(base, zone_ov)
+    out = Image.alpha_composite(out, Image.fromarray(crack_ov))
+    draw = ImageDraw.Draw(out)
+    try: font = ImageFont.truetype("DejaVuSans.ttf", 14)
     except: font = ImageFont.load_default()
 
     for _, r in df_comp.iterrows():
-        label = f"{r['clase'].replace('_',' ')} | {r['metros']:.2f} m"
-        draw.text((r['x'], r['y']), label, fill="white", font=font, stroke_width=1, stroke_fill="black")
-    return combined.convert("RGB")
+        txt = f"{r['clase'][0].upper()}: {r['metros']:.2f}m"
+        draw.rectangle([r['x']-2, r['y']-2, r['x']+80, r['y']+14], fill=(255,255,255,200))
+        draw.text((r['x'], r['y']), txt, fill=(0,0,0,255), font=font)
+    return out.convert("RGB")
 
-# --- APP FLOW ---
+# --- APP ---
+if 'data' not in st.session_state:
+    st.session_state.data = None
 
-if 'img_orig' not in st.session_state:
-    st.session_state.update({'img_orig': None, 'img_proc': None, 'resumen': None})
+st.sidebar.title("Configuración")
+pk_ini = st.sidebar.number_input("PK Inicio", value=119.500, format="%.3f")
+pk_fin = st.sidebar.number_input("PK Fin", value=119.750, format="%.3f")
+mode = st.sidebar.radio("Pantalla", ["Carga iPad", "Monitor Resultados"])
 
-st.sidebar.title("Navegación")
-app_mode = st.sidebar.radio("Seleccione Pantalla", ["Carga (iPad)", "Visualización Pública"])
+if mode == "Carga iPad":
+    st.title("📤 Entrada de Terreno")
+    up = st.file_uploader("Captura/Imagen", type=["jpg", "png", "jpeg"])
+    if up and st.button("PROCESAR"):
+        img = Image.open(up).convert("RGB")
+        arr = np.array(img)
+        mask = yellow_mask_rgb_hsv(arr)
+        labels, ncomp = ndi.label(mask)
+        slices = ndi.find_objects(labels)
+        
+        # Build Zone Map for Prorate
+        z_map = np.full(arr.shape[:2], -1)
+        (x0,x1,x2,x3,x4), hp2, hp1 = compute_zone_bounds(arr.shape[1])
+        z_map[:, x0:x1], z_map[:, x1:x2], z_map[:, x2:x3], z_map[:, x3:x4] = 0, 1, 2, 3
+        for h in [hp2, hp1]:
+            if h[1]>h[0]: z_map[:, h[0]:h[1]] = 4
+            if h[3]>h[2]: z_map[:, h[2]:h[3]] = 4
 
-if app_mode == "Carga (iPad)":
-    st.title("📤 Carga de Monografía")
-    uploaded_file = st.file_uploader("Subir imagen", type=["jpg", "png", "jpeg"])
-    
-    if uploaded_file and st.button("🚀 INICIAR PROCESAMIENTO"):
-        with st.spinner('Ejecutando motor original...'):
-            img = Image.open(uploaded_file).convert("RGB")
-            arr = np.array(img)
-            H, W = arr.shape[:2]
-            mask = yellow_mask_rgb_hsv(arr)
+        rows, prorr = [], []
+        for i, slc in enumerate(slices, start=1):
+            if slc is None or np.sum(labels[slc]==i) < 80: continue
+            ys, xs = np.nonzero(labels[slc]==i)
+            clase, Lpx, zona, xc, yc = classify_component(xs+slc[1].start, ys+slc[0].start, arr.shape[1])
+            f = S_TRANSVERSAL if clase=="transversal" else S_LONGITUDINAL if clase in ["longitudinal","en_el_eje"] else S_TODAS
+            Lm = Lpx * f
             
-            labels, ncomp = ndi.label(mask)
-            slices = ndi.find_objects(labels)
-            z_map = build_zone_maps(W, H)
-            
-            comp_data, prorr = [], []
-            for i, slc in enumerate(slices, start=1):
-                if slc is None or np.sum(labels[slc]==i) < 80: continue
-                ys, xs = np.nonzero(labels[slc]==i)
-                clase, Lpx, zona, xc, yc = classify_component(xs+slc[1].start, ys+slc[0].start, W)
-                
-                factor = S_TRANSVERSAL if clase=="transversal" else S_LONGITUDINAL if clase in ["longitudinal","en_el_eje"] else S_TODAS
-                Lm = Lpx * factor
-                comp_data.append({"id":i, "clase":clase, "metros":Lm, "x":xc, "y":yc})
-                
-                # Lógica de Prorrateo de tu código
-                c_mask = (labels == i)
-                total_px = np.sum(c_mask)
-                f_h2 = np.sum(z_map[c_mask] == 4) / total_px
-                f_h1 = np.sum(z_map[c_mask] == 5) / total_px
-                
-                if f_h2 >= HUELLA_MIN_FRAC: prorr.append({"Zona": "Huella P2", "Clase": clase, "Metros": Lm})
-                elif f_h1 >= HUELLA_MIN_FRAC: prorr.append({"Zona": "Huella P1", "Clase": clase, "Metros": Lm})
-                else: prorr.append({"Zona": zona, "Clase": clase, "Metros": Lm})
+            rows.append({"id":i, "clase":clase, "metros":Lm, "x":xc, "y":yc})
+            # Prorrateo
+            mask_c = (labels == i)
+            ratio_h = np.sum(z_map[mask_c] == 4) / np.sum(mask_c)
+            z_final = "Huella" if ratio_h >= HUELLA_MIN_FRAC else zona
+            prorr.append({"Zona": z_final, "Clase": clase, "Metros": Lm})
 
-            df_res = pd.DataFrame(prorr).groupby(["Zona", "Clase"])["Metros"].sum().reset_index()
-            st.session_state.update({'img_orig': img, 'img_proc': annotate_image(img, labels, pd.DataFrame(comp_data)), 'resumen': df_res})
-            st.success("¡Procesado! Cambie a Visualización Pública.")
+        df_p = pd.DataFrame(prorr).groupby(["Zona", "Clase"])["Metros"].sum().reset_index()
+        st.session_state.data = {"orig": img, "proc": annotate_image_final(img, labels, pd.DataFrame(rows)), "res": df_p}
+        st.success("Procesamiento completo.")
 
 else:
-    st.title("📊 Resultados en Pantalla")
-    if st.session_state.img_proc:
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Original")
-            st.image(st.session_state.img_orig, use_container_width=True)
-        with col2:
-            st.subheader("Clasificada (Prórrateo Huellas)")
-            st.image(st.session_state.img_proc, use_container_width=True)
-        
-        st.divider()
-        st.subheader("📋 Resumen de Mediciones")
-        st.table(st.session_state.resumen)
-        
-        if st.button("🆕 NUEVA INSPECCIÓN"):
-            for key in ['img_orig', 'img_proc', 'resumen']: st.session_state[key] = None
+    st.title("📊 Monitor de Inspección")
+    if st.session_state.data:
+        c1, c2 = st.columns(2)
+        c1.image(st.session_state.data["orig"], use_container_width=True, caption=f"Original PK {pk_ini}")
+        c2.image(st.session_state.data["proc"], use_container_width=True, caption="Análisis de Pistas y Huellas")
+        st.subheader("Resumen de Hallazgos")
+        st.dataframe(st.session_state.data["res"], use_container_width=True)
+        if st.button("Limpiar"):
+            st.session_state.data = None
             st.rerun()
     else:
-        st.info("Esperando datos desde el iPad...")
+        st.info("Esperando datos...")
