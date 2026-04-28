@@ -7,14 +7,7 @@ import matplotlib.colors as mcolors
 import io
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(layout="wide", page_title="Analizador de Pavimento")
-
-# Estética de la interfaz
-st.markdown("""
-    <style>
-    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #007BFF; color: white; font-weight: bold; }
-    </style>
-    """, unsafe_allow_html=True)
+st.set_page_config(layout="wide", page_title="Sistema de Inspección Vial")
 
 # --- CONSTANTES TÉCNICAS ---
 S_MIN_COLOR, V_MIN_COLOR = 0.25, 0.15
@@ -43,7 +36,9 @@ def yellow_mask_rgb_hsv(arr):
 def classify_component(xs, ys, W):
     x_c, y_c = xs.mean(), ys.mean()
     Xpx = np.vstack([xs - x_c, ys - y_c])
-    evals, evecs = np.linalg.eig(np.cov(Xpx))
+    cov = np.cov(Xpx)
+    if cov.ndim < 2: return "desconocido", 0, "fuera", x_c, y_c
+    evals, evecs = np.linalg.eig(cov)
     major = evecs[:, np.argmax(evals)]
     ang = abs(np.degrees(np.arctan2(major[1], major[0]))) % 180.0
     
@@ -76,30 +71,38 @@ def annotate_image(img_pil, labels, df_comp):
     combined = Image.alpha_composite(base, Image.fromarray(ov_arr))
     draw = ImageDraw.Draw(combined)
     
+    # TEXTO MÁS CHICO: Cambiado de 22 a 14
     try:
-        font = ImageFont.truetype("DejaVuSans.ttf", 22)
+        font = ImageFont.truetype("DejaVuSans.ttf", 14)
     except:
         font = ImageFont.load_default()
 
     for _, r in df_comp.iterrows():
-        txt = f"{r['clase']}: {r['metros']}m"
-        draw.text((r['x'], r['y']), txt, fill="white", font=font, stroke_width=2, stroke_fill="black")
+        txt = f"{r['clase'][0].upper()}: {r['metros']}m"
+        draw.text((r['x'], r['y']), txt, fill="white", font=font, stroke_width=1, stroke_fill="black")
         
     return combined.convert("RGB")
 
-# --- LÓGICA DE LA APLICACIÓN ---
+# --- GESTIÓN DE ESTADO Y NAVEGACIÓN ---
 
 if 'img_orig' not in st.session_state:
     st.session_state.img_orig = None
     st.session_state.img_proc = None
     st.session_state.resumen = None
 
-# Sidebar para el iPad
-with st.sidebar:
-    st.header("📸 Entrada iPad")
-    file = st.file_uploader("Cargar imagen", type=["jpg", "jpeg", "png"])
-    if file and st.button("🚀 PROCESAR"):
-        with st.spinner('Procesando...'):
+# Sidebar para navegar entre las dos páginas
+st.sidebar.title("Navegación")
+pagina = st.sidebar.radio("Ir a:", ["Carga (iPad)", "Visualización Pública"])
+
+# --- PÁGINA DE CARGA ---
+if pagina == "Carga (iPad)":
+    st.title("📤 Carga de Monografías")
+    st.write("Esta sección es para el uso exclusivo del técnico en terreno.")
+    
+    file = st.file_uploader("Sube la imagen aquí", type=["jpg", "jpeg", "png"])
+    
+    if file and st.button("🚀 PROCESAR E IR A RESULTADOS"):
+        with st.spinner('Analizando...'):
             img = Image.open(file).convert("RGB")
             arr = np.array(img)
             mask = yellow_mask_rgb_hsv(arr)
@@ -108,44 +111,52 @@ with st.sidebar:
             
             rows = []
             for i, slc in enumerate(slices, start=1):
-                if slc is None or np.sum(labels[slc]==i) < 80:
-                    continue
-                ys, xs = np.nonzero(labels[slc]==i)
-                clase, Lpx, zona, xc, yc = classify_component(xs+slc[1].start, ys+slc[0].start, arr.shape[1])
+                if slc is None: continue
+                if np.sum(labels[slc] == i) < 80: continue
+                
+                ys, xs = np.nonzero(labels[slc] == i)
+                clase, Lpx, zona, xc, yc = classify_component(xs + slc[1].start, ys + slc[0].start, arr.shape[1])
                 factor = S_TRANSVERSAL if clase == "transversal" else S_LONGITUDINAL
                 metros = round(Lpx * factor, 2)
-                # Línea corregida:
+                
                 rows.append({"id": i, "clase": clase, "metros": metros, "zona": zona, "x": xc, "y": yc})
             
             df = pd.DataFrame(rows)
             st.session_state.img_orig = img
-            st.session_state.img_proc = annotate_image(img, labels, df)
             if not df.empty:
+                st.session_state.img_proc = annotate_image(img, labels, df)
                 st.session_state.resumen = df.groupby(['zona', 'clase'])['metros'].sum().reset_index()
             else:
+                st.session_state.img_proc = img
                 st.session_state.resumen = pd.DataFrame(columns=['zona', 'clase', 'metros'])
-            st.rerun()
+            
+            st.success("Imagen lista. Cambia a 'Visualización Pública' para ver el resultado.")
 
-# Pantalla Pública
-st.title("🚧 Sistema de Inspección Vial")
-
-if st.session_state.img_proc:
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Original")
-        st.image(st.session_state.img_orig, use_container_width=True)
-    with c2:
-        st.subheader("Procesada")
-        st.image(st.session_state.img_proc, use_container_width=True)
-    
-    st.divider()
-    st.subheader("📊 Tabla de Resultados")
-    st.table(st.session_state.resumen)
-    
-    if st.button("🆕 EMPEZAR DE NUEVO"):
-        st.session_state.img_orig = None
-        st.session_state.img_proc = None
-        st.session_state.resumen = None
-        st.rerun()
+# --- PÁGINA DE SALIDA ---
 else:
-    st.info("Esperando carga desde el iPad...")
+    st.title("📊 Monitor de Resultados")
+    
+    if st.session_state.img_proc:
+        # Instrucción para el Zoom
+        st.caption("💡 Haz clic en las flechas de la esquina de la imagen para ampliar (Fullscreen/Zoom).")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("Original")
+            # use_container_width permite que Streamlit maneje el zoom nativo con la 'X' para volver
+            st.image(st.session_state.img_orig, use_container_width=True)
+        with c2:
+            st.subheader("Procesada (Etiquetas chicas)")
+            st.image(st.session_state.img_proc, use_container_width=True)
+        
+        st.divider()
+        st.subheader("📋 Resumen de Mediciones")
+        st.table(st.session_state.resumen)
+        
+        if st.button("🆕 LIMPIAR Y REINICIAR"):
+            st.session_state.img_orig = None
+            st.session_state.img_proc = None
+            st.session_state.resumen = None
+            st.rerun()
+    else:
+        st.info("Aún no hay datos procesados. Por favor, carga una imagen en la pestaña 'Carga (iPad)'.")
