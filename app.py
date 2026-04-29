@@ -8,21 +8,23 @@ import io
 import base64
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(layout="wide", page_title="Analizador de Pavimentos - Filtro Base")
+st.set_page_config(layout="wide", page_title="Analizador de Pavimentos - Calibrado 2550px")
 
 # --- CONSTANTES TÉCNICAS ---
 ANCHO_BERMA, ANCHO_PISTA = 2.0, 3.5
 ANCHO_TOTAL = 11.0 
 ANG_TOL, EJE_TOL_M = 20.0, 0.2
-MIN_YELLOW_PIXELS, MIN_YELLOW_RATIO = 150, 0.0005
-BLUE_H_MIN, BLUE_H_MAX = 200.0/360.0, 260.0/360.0
 
 # ESCALAS CALIBRADAS
 S_LONGITUDINAL = 0.075196
 S_TRANSVERSAL = 0.007338
 S_TODAS = 0.036909
 
-CENTER_OFFSET, PINK_LEFT_OFFSET, PINK_RIGHT_OFFSET = 105, 340, 620
+# CALIBRACIÓN FIJA PARA W = 2550
+# x_center_shifted = (2550 / 2) + 240 = 1515 px
+CENTER_OFFSET = 240 
+PINK_LEFT_OFFSET = 340 
+PINK_RIGHT_OFFSET = 620 
 HUELLA_MIN_FRAC = 0.75
 
 COLOR_MAP = {
@@ -39,36 +41,33 @@ def get_image_download_link(img):
     img_str = base64.b64encode(buffered.getvalue()).decode()
     return f"data:image/png;base64,{img_str}"
 
-# --- MOTOR DE PROCESAMIENTO CON FILTRO DE TEXTOS Y LÍNEAS GRISES ---
 def yellow_mask_rgb_hsv(arr):
     rgb = arr.astype(np.float32) / 255.0
     hsv = mcolors.rgb_to_hsv(rgb)
     S = hsv[..., 1]
     V = hsv[..., 2]
     
-    # 1. Detección de trazos (Negro y Colores)
     mask_black = (V < 0.35)
     mask_colors = (S > 0.25) & (V > 0.40)
     mask = mask_black | mask_colors
     
-    # 2. FILTRO CRÍTICO: Eliminación de líneas finas y textos
-    # Usamos una apertura (opening) más agresiva para eliminar elementos delgados
-    # como las líneas grises de la cuadrícula y las letras de la plantilla.
+    # Filtro para eliminar líneas grises y textos de la plantilla
     mask = ndi.binary_opening(mask, structure=np.ones((3, 3)))
-    
-    # 3. Re-unión de trazos de grietas legítimas
     mask = ndi.binary_closing(mask, structure=np.ones((4, 4)))
-    
     return mask
 
 def compute_zone_bounds(W):
+    # Eje central de referencia
     x_center_shifted = (W / 2.0) + CENTER_OFFSET
+    
     x1 = int(round(max(0, min(W, x_center_shifted - PINK_LEFT_OFFSET))))
     x3 = int(round(max(0, min(W, x_center_shifted + PINK_RIGHT_OFFSET))))
-    x2 = int(round((x1 + x3) / 2.0))
+    x2 = int(round(x_center_shifted)) # El eje divisorio es exactamente el x_center_shifted
+    
     def get_h(center_p, off, width, x_min, x_max):
         c = center_p + off
         return int(round(max(x_min, min(x_max, c - width/2.0)))), int(round(max(x_min, min(x_max, c + width/2.0))))
+    
     h_p2 = (*get_h((x1+x2)/2.0, -100, 100, x1, x2), *get_h((x1+x2)/2.0, 100, 85, x1, x2))
     h_p1 = (*get_h((x2+x3)/2.0, -120, 100, x2, x3), *get_h((x2+x3)/2.0, 120, 100, x2, x3))
     return (0, x1, x2, x3, W), h_p2, h_p1
@@ -89,12 +88,8 @@ def classify_component(xs, ys, W):
     elif x_c < x3: zona = "Lane 1"
     else: zona = "Right Shoulder"
     
-    # Obtenemos el centro ajustado directamente
-    x_center_shifted = (W / 2.0) + CENTER_OFFSET
-
-    # El eje de comparación ahora es exactamente el centro ajustado
-    x_p2_eje = x_center_shifted 
-
+    # El eje para "On Axis" es siempre el centro ajustado
+    x_p2_eje = (W / 2.0) + CENTER_OFFSET
     dist_min_m = float(np.min(np.abs(xs - x_p2_eje))) * S_LONGITUDINAL
 
     if abs(ang - 90.0) <= ANG_TOL:
@@ -131,12 +126,12 @@ def annotate_image_final(img_pil, labels, df_comp):
     out = Image.alpha_composite(base, zone_ov)
     out = Image.alpha_composite(out, Image.fromarray(crack_ov))
     draw = ImageDraw.Draw(out)
-    try: font = ImageFont.truetype("DejaVuSans.ttf", 14)
+    try: font = ImageFont.truetype("DejaVuSans.ttf", 18) # Aumentado para 2550px
     except: font = ImageFont.load_default()
 
     for _, r in df_comp.iterrows():
         txt = f"{r['clase']}: {r['metros']:.2f}m"
-        draw.rectangle([r['x']-2, r['y']-2, r['x']+110, r['y']+14], fill=(255,255,255,200))
+        draw.rectangle([r['x']-2, r['y']-2, r['x']+180, r['y']+25], fill=(255,255,255,200))
         draw.text((r['x'], r['y']), txt, fill=(0,0,0,255), font=font)
     return out.convert("RGB")
 
@@ -148,18 +143,20 @@ st.sidebar.title("Navigation")
 mode = st.sidebar.radio("Go to:", ["Field Upload", "Results Monitor"])
 
 if mode == "Field Upload":
-    st.title("📤 Road Data Input")
+    st.title("📤 Road Data Input (Calibrated for 2550px)")
     up = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
     if up and st.button("🚀 PROCESS IMAGE"):
         with st.spinner('Analyzing infrastructure...'):
             img = Image.open(up).convert("RGB")
             arr = np.array(img)
+            W_real = arr.shape[1]
+            
             mask = yellow_mask_rgb_hsv(arr)
             labels, ncomp = ndi.label(mask)
             slices = ndi.find_objects(labels)
             
             z_map = np.full(arr.shape[:2], -1)
-            (x0,x1,x2,x3,x4), hp2, hp1 = compute_zone_bounds(arr.shape[1])
+            (x0,x1,x2,x3,x4), hp2, hp1 = compute_zone_bounds(W_real)
             z_map[:, x0:x1], z_map[:, x1:x2], z_map[:, x2:x3], z_map[:, x3:x4] = 0, 1, 2, 3
             for h in [hp2, hp1]:
                 if h[1]>h[0]: z_map[:, h[0]:h[1]] = 4
@@ -167,14 +164,11 @@ if mode == "Field Upload":
 
             rows, prorr = [], []
             for i, slc in enumerate(slices, start=1):
-                # Filtro de área mínimo aumentado para asegurar que textos pequeños no pasen
                 if slc is None or np.sum(labels[slc]==i) < 200: continue
                 ys, xs = np.nonzero(labels[slc]==i)
-                clase, Lpx, zona, xc, yc = classify_component(xs+slc[1].start, ys+slc[0].start, arr.shape[1])
+                clase, Lpx, zona, xc, yc = classify_component(xs+slc[1].start, ys+slc[0].start, W_real)
                 
-                if clase == "Transverse": f = S_TRANSVERSAL
-                elif clase in ["Longitudinal", "On Axis"]: f = S_LONGITUDINAL
-                else: f = S_TODAS
+                f = S_TRANSVERSAL if clase == "Transverse" else (S_LONGITUDINAL if clase in ["Longitudinal", "On Axis"] else S_TODAS)
                 
                 Lm = Lpx * f
                 rows.append({"id":i, "clase":clase, "metros":Lm, "x":xc, "y":yc})
@@ -191,29 +185,26 @@ if mode == "Field Upload":
             st.session_state.data = {
                 "orig": img, 
                 "proc": annotate_image_final(img, labels, pd.DataFrame(rows)) if len(rows) > 0 else img, 
-                "res": df_p
+                "res": df_p,
+                "w_det": W_real
             }
-            if len(prorr) == 0: st.warning("No distress detected.")
-            else: st.success("Processing complete. Template lines and text ignored.")
+            st.success(f"Processing complete. W detected: {W_real}px. Center shifted: { (W_real/2)+CENTER_OFFSET }px")
 
 else:
-    # (Resto del código de visualización idéntico)
     st.title("📊 Analysis Results")
     if st.session_state.data:
-        st.info("💡 **TIP:** Hover over the right image to zoom.")
+        st.write(f"**Image Resolution:** {st.session_state.data['w_det']}px width")
         c1, c2 = st.columns(2)
         with c1:
             st.subheader("Original")
             st.image(st.session_state.data["orig"], use_container_width=True)
         with c2:
-            st.subheader("Distress Map (Zoomed)")
+            st.subheader("Distress Map")
             img_b64 = get_image_download_link(st.session_state.data["proc"])
             zoom_html = f"""
             <div style="overflow: hidden; border: 1px solid #444; border-radius: 10px;">
-                <img src="{img_b64}" 
-                     style="width: 100%; transition: transform .3s ease; cursor: crosshair;" 
-                     onmouseover="this.style.transform='scale(2.5)'" 
-                     onmouseout="this.style.transform='scale(1)'"
+                <img src="{img_b64}" style="width: 100%; transition: transform .3s ease; cursor: crosshair;" 
+                     onmouseover="this.style.transform='scale(2.5)'" onmouseout="this.style.transform='scale(1)'"
                      onmousemove="this.style.transformOrigin = ((event.offsetX / this.width) * 100) + '% ' + ((event.offsetY / this.height) * 100) + '%'">
             </div>
             """
