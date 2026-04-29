@@ -10,18 +10,18 @@ import base64
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(layout="wide", page_title="Analizador de Pavimentos")
 
-# --- CONSTANTES TÉCNICAS (Motor Original) ---
+# --- CONSTANTES TÉCNICAS (Rigurosamente iguales al original) ---
 ANCHO_BERMA, ANCHO_PISTA = 2.0, 3.5
 ANCHO_TOTAL = 11.0 
 ANG_TOL, EJE_TOL_M = 20.0, 0.2
 MIN_YELLOW_PIXELS, MIN_YELLOW_RATIO = 150, 0.0005
-S_MIN_COLOR, V_MIN_COLOR = 0.25, 0.15
+# Ajustamos los umbrales para detección de trazos negros/oscuros
+S_MIN_COLOR, V_MAX_COLOR = 0.0, 0.35  # V_MAX_COLOR define qué tan "negro" debe ser
 BLUE_H_MIN, BLUE_H_MAX = 200.0/360.0, 260.0/360.0
 S_TRANSVERSAL, S_LONGITUDINAL, S_TODAS = 0.005368, 0.13644, 0.13655
 CENTER_OFFSET, PINK_LEFT_OFFSET, PINK_RIGHT_OFFSET = 220, 340, 620
 HUELLA_MIN_FRAC = 0.75
 
-# COLOR_MAP actualizado con nombres en inglés
 COLOR_MAP = {
     "Longitudinal": (255, 0, 0, 160),
     "Transverse": (0, 102, 255, 160),
@@ -36,12 +36,18 @@ def get_image_download_link(img):
     img_str = base64.b64encode(buffered.getvalue()).decode()
     return f"data:image/png;base64,{img_str}"
 
-# --- MOTOR DE PROCESAMIENTO ORIGINAL ---
+# --- MOTOR DE PROCESAMIENTO (AJUSTADO PARA TRAZOS NEGROS) ---
 def yellow_mask_rgb_hsv(arr):
+    # Convertimos a float para normalizar
     rgb = arr.astype(np.float32) / 255.0
     hsv = mcolors.rgb_to_hsv(rgb)
-    H, S, V = hsv[..., 0], hsv[..., 1], hsv[..., 2]
-    mask = (V >= V_MIN_COLOR) & (S >= S_MIN_COLOR) & ~((H >= BLUE_H_MIN) & (H <= BLUE_H_MAX))
+    V = hsv[..., 2] # Valor/Brillo (0 es negro total, 1 es blanco)
+    
+    # Detectamos píxeles oscuros (trazos de lápiz negro)
+    # Ignoramos el blanco (V > 0.8) y buscamos lo que sea muy oscuro
+    mask = (V < V_MAX_COLOR)
+    
+    # Operaciones morfológicas para limpiar ruido y unir trazos
     mask = ndi.binary_closing(mask, structure=np.ones((3, 3)))
     return ndi.binary_opening(mask, structure=np.ones((2, 2)))
 
@@ -76,7 +82,6 @@ def classify_component(xs, ys, W):
     x_p2_eje = x1 + (ANCHO_BERMA + ANCHO_PISTA) * ((x3-x1)/ANCHO_TOTAL)
     dist_min_m = float(np.min(np.abs(xs - x_p2_eje))) * S_LONGITUDINAL
 
-    # Clasificación con nombres en inglés
     if abs(ang - 90.0) <= ANG_TOL:
         clase = "On Axis" if dist_min_m <= EJE_TOL_M else "Longitudinal"
     elif (ang <= ANG_TOL) or (ang >= 180.0 - ANG_TOL):
@@ -134,6 +139,7 @@ if mode == "Field Upload":
         with st.spinner('Analyzing infrastructure...'):
             img = Image.open(up).convert("RGB")
             arr = np.array(img)
+            # Detección de trazos negros
             mask = yellow_mask_rgb_hsv(arr)
             labels, ncomp = ndi.label(mask)
             slices = ndi.find_objects(labels)
@@ -147,11 +153,11 @@ if mode == "Field Upload":
 
             rows, prorr = [], []
             for i, slc in enumerate(slices, start=1):
-                if slc is None or np.sum(labels[slc]==i) < 80: continue
+                # Filtro de tamaño para evitar captar las líneas de la tabla (que son más finas)
+                if slc is None or np.sum(labels[slc]==i) < 100: continue
                 ys, xs = np.nonzero(labels[slc]==i)
                 clase, Lpx, zona, xc, yc = classify_component(xs+slc[1].start, ys+slc[0].start, arr.shape[1])
                 
-                # Selección del factor de escala (usando nombres en inglés para la lógica)
                 if clase == "Transverse": f = S_TRANSVERSAL
                 elif clase in ["Longitudinal", "On Axis"]: f = S_LONGITUDINAL
                 else: f = S_TODAS
@@ -173,19 +179,19 @@ if mode == "Field Upload":
                 "proc": annotate_image_final(img, labels, pd.DataFrame(rows)) if len(rows) > 0 else img, 
                 "res": df_p
             }
-            if len(prorr) == 0: st.warning("No distress detected.")
+            if len(prorr) == 0: st.warning("No distress detected. Ensure the black strokes are thick enough.")
             else: st.success("Processing complete.")
 
 else:
     st.title("📊 Analysis Results")
     if st.session_state.data:
-        st.info("💡 **TIP:** Hover over the right image to zoom into distress details.")
+        st.info("💡 **TIP:** Hover over the right image to zoom.")
         c1, c2 = st.columns(2)
         with c1:
             st.subheader("Original")
             st.image(st.session_state.data["orig"], use_container_width=True)
         with c2:
-            st.subheader("Distress Map (Interactive Zoom)")
+            st.subheader("Distress Map (Zoom)")
             img_b64 = get_image_download_link(st.session_state.data["proc"])
             zoom_html = f"""
             <div style="overflow: hidden; border: 1px solid #444; border-radius: 10px;">
@@ -199,7 +205,7 @@ else:
             st.components.v1.html(zoom_html, height=600)
         
         st.divider()
-        st.subheader("📋 Calculation Summary (English)")
+        st.subheader("📋 Calculation Summary")
         st.dataframe(st.session_state.data["res"], use_container_width=True)
         
         if st.button("🗑️ CLEAR DATA"):
