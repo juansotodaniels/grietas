@@ -89,7 +89,12 @@ def classify_component(xs, ys, W):
     elif x_c < x3: zona = "Lane 1"
     else: zona = "Right Shoulder"
     
-    x_p2_eje = x1 + (ANCHO_BERMA + ANCHO_PISTA) * ((x3-x1)/ANCHO_TOTAL)
+    # Obtenemos el centro ajustado directamente
+    x_center_shifted = (W / 2.0) + CENTER_OFFSET
+
+    # El eje de comparación ahora es exactamente el centro ajustado
+    x_p2_eje = x_center_shifted 
+
     dist_min_m = float(np.min(np.abs(xs - x_p2_eje))) * S_LONGITUDINAL
 
     if abs(ang - 90.0) <= ANG_TOL:
