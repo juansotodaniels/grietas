@@ -8,7 +8,7 @@ import io
 import base64
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(layout="wide", page_title="Analizador de Pavimentos - Multinivel")
+st.set_page_config(layout="wide", page_title="Analizador de Pavimentos - Filtro Base")
 
 # --- CONSTANTES TÉCNICAS ---
 ANCHO_BERMA, ANCHO_PISTA = 2.0, 3.5
@@ -17,7 +17,7 @@ ANG_TOL, EJE_TOL_M = 20.0, 0.2
 MIN_YELLOW_PIXELS, MIN_YELLOW_RATIO = 150, 0.0005
 BLUE_H_MIN, BLUE_H_MAX = 200.0/360.0, 260.0/360.0
 
-# ESCALAS CALIBRADAS (Manteniendo tu precisión)
+# ESCALAS CALIBRADAS
 S_LONGITUDINAL = 0.075196
 S_TRANSVERSAL = 0.007338
 S_TODAS = 0.036909
@@ -39,26 +39,27 @@ def get_image_download_link(img):
     img_str = base64.b64encode(buffered.getvalue()).decode()
     return f"data:image/png;base64,{img_str}"
 
-# --- MOTOR DE PROCESAMIENTO MULTICOLOR ---
+# --- MOTOR DE PROCESAMIENTO CON FILTRO DE TEXTOS Y LÍNEAS GRISES ---
 def yellow_mask_rgb_hsv(arr):
     rgb = arr.astype(np.float32) / 255.0
     hsv = mcolors.rgb_to_hsv(rgb)
-    S = hsv[..., 1] # Saturación
-    V = hsv[..., 2] # Brillo
+    S = hsv[..., 1]
+    V = hsv[..., 2]
     
-    # CRITERIO 1: Detectar Negro/Gris Oscuro (Brillo bajo)
+    # 1. Detección de trazos (Negro y Colores)
     mask_black = (V < 0.35)
-    
-    # CRITERIO 2: Detectar Colores (Saturación alta, ej: Amarillo, Rojo, Azul)
-    # Filtramos para que no agarre el blanco del papel (que tiene saturación casi 0)
     mask_colors = (S > 0.25) & (V > 0.40)
-    
-    # Unimos ambas máscaras: Si es muy oscuro O si tiene color vivo, se procesa
     mask = mask_black | mask_colors
     
-    # Limpieza morfológica
-    mask = ndi.binary_closing(mask, structure=np.ones((3, 3)))
-    return ndi.binary_opening(mask, structure=np.ones((2, 2)))
+    # 2. FILTRO CRÍTICO: Eliminación de líneas finas y textos
+    # Usamos una apertura (opening) más agresiva para eliminar elementos delgados
+    # como las líneas grises de la cuadrícula y las letras de la plantilla.
+    mask = ndi.binary_opening(mask, structure=np.ones((3, 3)))
+    
+    # 3. Re-unión de trazos de grietas legítimas
+    mask = ndi.binary_closing(mask, structure=np.ones((4, 4)))
+    
+    return mask
 
 def compute_zone_bounds(W):
     x_center_shifted = (W / 2.0) + CENTER_OFFSET
@@ -161,7 +162,8 @@ if mode == "Field Upload":
 
             rows, prorr = [], []
             for i, slc in enumerate(slices, start=1):
-                if slc is None or np.sum(labels[slc]==i) < 100: continue
+                # Filtro de área mínimo aumentado para asegurar que textos pequeños no pasen
+                if slc is None or np.sum(labels[slc]==i) < 200: continue
                 ys, xs = np.nonzero(labels[slc]==i)
                 clase, Lpx, zona, xc, yc = classify_component(xs+slc[1].start, ys+slc[0].start, arr.shape[1])
                 
@@ -186,10 +188,11 @@ if mode == "Field Upload":
                 "proc": annotate_image_final(img, labels, pd.DataFrame(rows)) if len(rows) > 0 else img, 
                 "res": df_p
             }
-            if len(prorr) == 0: st.warning("No distress detected. Check strokes.")
-            else: st.success("Processing complete (Multicolor detection active).")
+            if len(prorr) == 0: st.warning("No distress detected.")
+            else: st.success("Processing complete. Template lines and text ignored.")
 
 else:
+    # (Resto del código de visualización idéntico)
     st.title("📊 Analysis Results")
     if st.session_state.data:
         st.info("💡 **TIP:** Hover over the right image to zoom.")
@@ -198,7 +201,7 @@ else:
             st.subheader("Original")
             st.image(st.session_state.data["orig"], use_container_width=True)
         with c2:
-            st.subheader("Distress Map (Zoom)")
+            st.subheader("Distress Map (Zoomed)")
             img_b64 = get_image_download_link(st.session_state.data["proc"])
             zoom_html = f"""
             <div style="overflow: hidden; border: 1px solid #444; border-radius: 10px;">
