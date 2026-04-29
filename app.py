@@ -21,11 +21,12 @@ S_TRANSVERSAL, S_LONGITUDINAL, S_TODAS = 0.005368, 0.13644, 0.13655
 CENTER_OFFSET, PINK_LEFT_OFFSET, PINK_RIGHT_OFFSET = 220, 340, 620
 HUELLA_MIN_FRAC = 0.75
 
+# COLOR_MAP actualizado con nombres en inglés
 COLOR_MAP = {
-    "longitudinal": (255, 0, 0, 160),
-    "transversal": (0, 102, 255, 160),
-    "en_el_eje": (0, 180, 0, 180),
-    "en_todas_direcciones": (200, 0, 200, 160)
+    "Longitudinal": (255, 0, 0, 160),
+    "Transverse": (0, 102, 255, 160),
+    "On Axis": (0, 180, 0, 180),
+    "In all directions": (200, 0, 200, 160)
 }
 
 # --- FUNCIONES DE APOYO ---
@@ -52,7 +53,6 @@ def compute_zone_bounds(W):
     def get_h(center_p, off, width, x_min, x_max):
         c = center_p + off
         return int(round(max(x_min, min(x_max, c - width/2.0)))), int(round(max(x_min, min(x_max, c + width/2.0))))
-    # Huellas (Wheel Paths)
     h_p2 = (*get_h((x1+x2)/2.0, -100, 100, x1, x2), *get_h((x1+x2)/2.0, 100, 85, x1, x2))
     h_p1 = (*get_h((x2+x3)/2.0, -120, 100, x2, x3), *get_h((x2+x3)/2.0, 120, 100, x2, x3))
     return (0, x1, x2, x3, W), h_p2, h_p1
@@ -61,14 +61,13 @@ def classify_component(xs, ys, W):
     x_c, y_c = xs.mean(), ys.mean()
     Xpx = np.vstack([xs - x_c, ys - y_c])
     cov = np.cov(Xpx)
-    if cov.ndim < 2: return "unknown", 0, "Outside", x_c, y_c
+    if cov.ndim < 2: return "Unknown", 0, "Outside", x_c, y_c
     evals, evecs = np.linalg.eig(cov)
     major = evecs[:, np.argmax(evals)]
     ang = abs(np.degrees(np.arctan2(major[1], major[0]))) % 180.0
     
     (x0, x1, x2, x3, x4), _, _ = compute_zone_bounds(W)
     
-    # Traducción de zonas solicitada
     if x_c < x1: zona = "Left Shoulder"
     elif x_c < x2: zona = "Lane 2"
     elif x_c < x3: zona = "Lane 1"
@@ -77,12 +76,13 @@ def classify_component(xs, ys, W):
     x_p2_eje = x1 + (ANCHO_BERMA + ANCHO_PISTA) * ((x3-x1)/ANCHO_TOTAL)
     dist_min_m = float(np.min(np.abs(xs - x_p2_eje))) * S_LONGITUDINAL
 
+    # Clasificación con nombres en inglés
     if abs(ang - 90.0) <= ANG_TOL:
-        clase = "en_el_eje" if dist_min_m <= EJE_TOL_M else "longitudinal"
+        clase = "On Axis" if dist_min_m <= EJE_TOL_M else "Longitudinal"
     elif (ang <= ANG_TOL) or (ang >= 180.0 - ANG_TOL):
-        clase = "transversal"
+        clase = "Transverse"
     else:
-        clase = "en_todas_direcciones"
+        clase = "In all directions"
     
     Lpx = float(np.ptp(major[0]*(xs-x_c) + major[1]*(ys-y_c)))
     return clase, Lpx, zona, x_c, y_c
@@ -94,14 +94,12 @@ def annotate_image_final(img_pil, labels, df_comp):
     zdraw = ImageDraw.Draw(zone_ov)
     (x0, x1, x2, x3, x4), hp2, hp1 = compute_zone_bounds(W)
     
-    # Colores semitransparentes de zonas
     cols = {"SHOULDER": (255,255,0,70), "LANE2": (0,200,255,70), "LANE1": (255,150,255,70)}
     if x1>x0: zdraw.rectangle([x0,0,x1,H], fill=cols["SHOULDER"])
     if x2>x1: zdraw.rectangle([x1,0,x2,H], fill=cols["LANE2"])
     if x3>x2: zdraw.rectangle([x2,0,x3,H], fill=cols["LANE1"])
     if x4>x3: zdraw.rectangle([x3,0,x4,H], fill=cols["SHOULDER"])
     
-    # Wheel Paths (Huellas)
     for h in [hp2, hp1]:
         if h[1]>h[0]: zdraw.rectangle([h[0],0,h[1],H], fill=(255,0,0,100))
         if h[3]>h[2]: zdraw.rectangle([h[2],0,h[3],H], fill=(255,0,0,100))
@@ -117,8 +115,8 @@ def annotate_image_final(img_pil, labels, df_comp):
     except: font = ImageFont.load_default()
 
     for _, r in df_comp.iterrows():
-        txt = f"{r['clase'][0].upper()}: {r['metros']:.2f}m"
-        draw.rectangle([r['x']-2, r['y']-2, r['x']+80, r['y']+14], fill=(255,255,255,200))
+        txt = f"{r['clase']}: {r['metros']:.2f}m"
+        draw.rectangle([r['x']-2, r['y']-2, r['x']+110, r['y']+14], fill=(255,255,255,200))
         draw.text((r['x'], r['y']), txt, fill=(0,0,0,255), font=font)
     return out.convert("RGB")
 
@@ -152,14 +150,16 @@ if mode == "Field Upload":
                 if slc is None or np.sum(labels[slc]==i) < 80: continue
                 ys, xs = np.nonzero(labels[slc]==i)
                 clase, Lpx, zona, xc, yc = classify_component(xs+slc[1].start, ys+slc[0].start, arr.shape[1])
-                f = S_TRANSVERSAL if clase=="transversal" else S_LONGITUDINAL if clase in ["longitudinal","en_el_eje"] else S_TODAS
-                Lm = Lpx * f
                 
+                # Selección del factor de escala (usando nombres en inglés para la lógica)
+                if clase == "Transverse": f = S_TRANSVERSAL
+                elif clase in ["Longitudinal", "On Axis"]: f = S_LONGITUDINAL
+                else: f = S_TODAS
+                
+                Lm = Lpx * f
                 rows.append({"id":i, "clase":clase, "metros":Lm, "x":xc, "y":yc})
                 mask_c = (labels == i)
                 ratio_h = np.sum(z_map[mask_c] == 4) / np.sum(mask_c)
-                
-                # Traducción del prorrateo a Wheel Path
                 z_final = "Wheel Path" if ratio_h >= HUELLA_MIN_FRAC else zona
                 prorr.append({"Zone": z_final, "Type": clase, "Meters": Lm})
 
@@ -200,7 +200,6 @@ else:
         
         st.divider()
         st.subheader("📋 Calculation Summary (English)")
-        # La tabla ahora usa Lane 1, Lane 2, Shoulder y Wheel Path
         st.dataframe(st.session_state.data["res"], use_container_width=True)
         
         if st.button("🗑️ CLEAR DATA"):
