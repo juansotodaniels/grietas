@@ -8,16 +8,20 @@ import io
 import base64
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(layout="wide", page_title="Analizador de Pavimentos")
+st.set_page_config(layout="wide", page_title="Analizador de Pavimentos - Multinivel")
 
-# --- CONSTANTES TÉCNICAS (Motor Original) ---
+# --- CONSTANTES TÉCNICAS ---
 ANCHO_BERMA, ANCHO_PISTA = 2.0, 3.5
 ANCHO_TOTAL = 11.0 
 ANG_TOL, EJE_TOL_M = 20.0, 0.2
-MIN_YELLOW_PIXELS = 80 # Umbral mínimo de pixeles por componente
-S_MIN_COLOR, V_MIN_COLOR = 0.25, 0.15
+MIN_YELLOW_PIXELS, MIN_YELLOW_RATIO = 150, 0.0005
 BLUE_H_MIN, BLUE_H_MAX = 200.0/360.0, 260.0/360.0
-S_TRANSVERSAL, S_LONGITUDINAL, S_TODAS = 0.005368, 0.13644, 0.13655
+
+# ESCALAS CALIBRADAS (Manteniendo tu precisión)
+S_LONGITUDINAL = 0.075196
+S_TRANSVERSAL = 0.007338
+S_TODAS = 0.036909
+
 CENTER_OFFSET, PINK_LEFT_OFFSET, PINK_RIGHT_OFFSET = 220, 340, 620
 HUELLA_MIN_FRAC = 0.75
 
@@ -35,24 +39,25 @@ def get_image_download_link(img):
     img_str = base64.b64encode(buffered.getvalue()).decode()
     return f"data:image/png;base64,{img_str}"
 
-# --- MOTOR DE PROCESAMIENTO ACTUALIZADO (AMARILLO + NEGRO) ---
-def dual_color_mask(arr):
+# --- MOTOR DE PROCESAMIENTO MULTICOLOR ---
+def yellow_mask_rgb_hsv(arr):
     rgb = arr.astype(np.float32) / 255.0
     hsv = mcolors.rgb_to_hsv(rgb)
-    H, S, V = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    S = hsv[..., 1] # Saturación
+    V = hsv[..., 2] # Brillo
     
-    # 1. Máscara Amarilla Original
-    yellow_mask = (V >= V_MIN_COLOR) & (S >= S_MIN_COLOR) & ~((H >= BLUE_H_MIN) & (H <= BLUE_H_MAX))
+    # CRITERIO 1: Detectar Negro/Gris Oscuro (Brillo bajo)
+    mask_black = (V < 0.35)
     
-    # 2. Máscara para Negro (Trazos muy oscuros)
-    # Buscamos valores de brillo muy bajos, típicamente menores a 0.25 en dibujos digitales
-    black_mask = (V < 0.25)
+    # CRITERIO 2: Detectar Colores (Saturación alta, ej: Amarillo, Rojo, Azul)
+    # Filtramos para que no agarre el blanco del papel (que tiene saturación casi 0)
+    mask_colors = (S > 0.25) & (V > 0.40)
     
-    # Combinación de ambas (OR lógico)
-    combined_mask = yellow_mask | black_mask
+    # Unimos ambas máscaras: Si es muy oscuro O si tiene color vivo, se procesa
+    mask = mask_black | mask_colors
     
-    # Limpieza morfológica para eliminar puntos aislados y cerrar trazos
-    mask = ndi.binary_closing(combined_mask, structure=np.ones((3, 3)))
+    # Limpieza morfológica
+    mask = ndi.binary_closing(mask, structure=np.ones((3, 3)))
     return ndi.binary_opening(mask, structure=np.ones((2, 2)))
 
 def compute_zone_bounds(W):
@@ -77,6 +82,7 @@ def classify_component(xs, ys, W):
     ang = abs(np.degrees(np.arctan2(major[1], major[0]))) % 180.0
     
     (x0, x1, x2, x3, x4), _, _ = compute_zone_bounds(W)
+    
     if x_c < x1: zona = "Left Shoulder"
     elif x_c < x2: zona = "Lane 2"
     elif x_c < x3: zona = "Lane 1"
@@ -128,7 +134,7 @@ def annotate_image_final(img_pil, labels, df_comp):
         draw.text((r['x'], r['y']), txt, fill=(0,0,0,255), font=font)
     return out.convert("RGB")
 
-# --- APP FLOW ---
+# --- APP ---
 if 'data' not in st.session_state:
     st.session_state.data = None
 
@@ -136,13 +142,13 @@ st.sidebar.title("Navigation")
 mode = st.sidebar.radio("Go to:", ["Field Upload", "Results Monitor"])
 
 if mode == "Field Upload":
-    st.title("📤 Road Data Input (Yellow & Black Detection)")
+    st.title("📤 Road Data Input")
     up = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
     if up and st.button("🚀 PROCESS IMAGE"):
-        with st.spinner('Analyzing markings...'):
+        with st.spinner('Analyzing infrastructure...'):
             img = Image.open(up).convert("RGB")
             arr = np.array(img)
-            mask = dual_color_mask(arr)
+            mask = yellow_mask_rgb_hsv(arr)
             labels, ncomp = ndi.label(mask)
             slices = ndi.find_objects(labels)
             
@@ -155,7 +161,7 @@ if mode == "Field Upload":
 
             rows, prorr = [], []
             for i, slc in enumerate(slices, start=1):
-                if slc is None or np.sum(labels[slc]==i) < MIN_YELLOW_PIXELS: continue
+                if slc is None or np.sum(labels[slc]==i) < 100: continue
                 ys, xs = np.nonzero(labels[slc]==i)
                 clase, Lpx, zona, xc, yc = classify_component(xs+slc[1].start, ys+slc[0].start, arr.shape[1])
                 
@@ -180,18 +186,19 @@ if mode == "Field Upload":
                 "proc": annotate_image_final(img, labels, pd.DataFrame(rows)) if len(rows) > 0 else img, 
                 "res": df_p
             }
-            if len(prorr) == 0: st.warning("No distress detected. Check pen color.")
-            else: st.success("Processing complete.")
+            if len(prorr) == 0: st.warning("No distress detected. Check strokes.")
+            else: st.success("Processing complete (Multicolor detection active).")
 
 else:
     st.title("📊 Analysis Results")
     if st.session_state.data:
+        st.info("💡 **TIP:** Hover over the right image to zoom.")
         c1, c2 = st.columns(2)
         with c1:
             st.subheader("Original")
             st.image(st.session_state.data["orig"], use_container_width=True)
         with c2:
-            st.subheader("Distress Map (Interactive Zoom)")
+            st.subheader("Distress Map (Zoom)")
             img_b64 = get_image_download_link(st.session_state.data["proc"])
             zoom_html = f"""
             <div style="overflow: hidden; border: 1px solid #444; border-radius: 10px;">
