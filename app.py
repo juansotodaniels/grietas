@@ -10,7 +10,7 @@ import base64
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(layout="wide", page_title="Analizador de Pavimentos")
 
-# --- CONSTANTES TÉCNICAS (Rigurosamente iguales al original) ---
+# --- CONSTANTES TÉCNICAS (Motor Original) ---
 ANCHO_BERMA, ANCHO_PISTA = 2.0, 3.5
 ANCHO_TOTAL = 11.0 
 ANG_TOL, EJE_TOL_M = 20.0, 0.2
@@ -52,6 +52,7 @@ def compute_zone_bounds(W):
     def get_h(center_p, off, width, x_min, x_max):
         c = center_p + off
         return int(round(max(x_min, min(x_max, c - width/2.0)))), int(round(max(x_min, min(x_max, c + width/2.0))))
+    # Huellas (Wheel Paths)
     h_p2 = (*get_h((x1+x2)/2.0, -100, 100, x1, x2), *get_h((x1+x2)/2.0, 100, 85, x1, x2))
     h_p1 = (*get_h((x2+x3)/2.0, -120, 100, x2, x3), *get_h((x2+x3)/2.0, 120, 100, x2, x3))
     return (0, x1, x2, x3, W), h_p2, h_p1
@@ -60,18 +61,29 @@ def classify_component(xs, ys, W):
     x_c, y_c = xs.mean(), ys.mean()
     Xpx = np.vstack([xs - x_c, ys - y_c])
     cov = np.cov(Xpx)
-    if cov.ndim < 2: return "desconocido", 0, "Fuera", x_c, y_c
+    if cov.ndim < 2: return "unknown", 0, "Outside", x_c, y_c
     evals, evecs = np.linalg.eig(cov)
     major = evecs[:, np.argmax(evals)]
     ang = abs(np.degrees(np.arctan2(major[1], major[0]))) % 180.0
+    
     (x0, x1, x2, x3, x4), _, _ = compute_zone_bounds(W)
-    zona = "Berma Izq" if x_c < x1 else "P2" if x_c < x2 else "P1" if x_c < x3 else "Berma Der"
+    
+    # Traducción de zonas solicitada
+    if x_c < x1: zona = "Left Shoulder"
+    elif x_c < x2: zona = "Lane 2"
+    elif x_c < x3: zona = "Lane 1"
+    else: zona = "Right Shoulder"
+    
     x_p2_eje = x1 + (ANCHO_BERMA + ANCHO_PISTA) * ((x3-x1)/ANCHO_TOTAL)
     dist_min_m = float(np.min(np.abs(xs - x_p2_eje))) * S_LONGITUDINAL
+
     if abs(ang - 90.0) <= ANG_TOL:
         clase = "en_el_eje" if dist_min_m <= EJE_TOL_M else "longitudinal"
-    elif (ang <= ANG_TOL) or (ang >= 180.0 - ANG_TOL): clase = "transversal"
-    else: clase = "en_todas_direcciones"
+    elif (ang <= ANG_TOL) or (ang >= 180.0 - ANG_TOL):
+        clase = "transversal"
+    else:
+        clase = "en_todas_direcciones"
+    
     Lpx = float(np.ptp(major[0]*(xs-x_c) + major[1]*(ys-y_c)))
     return clase, Lpx, zona, x_c, y_c
 
@@ -81,40 +93,47 @@ def annotate_image_final(img_pil, labels, df_comp):
     zone_ov = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     zdraw = ImageDraw.Draw(zone_ov)
     (x0, x1, x2, x3, x4), hp2, hp1 = compute_zone_bounds(W)
-    cols = {"BI": (255,255,0,70), "P2": (0,200,255,70), "P1": (255,150,255,70), "BD": (150,230,0,70)}
-    if x1>x0: zdraw.rectangle([x0,0,x1,H], fill=cols["BI"])
-    if x2>x1: zdraw.rectangle([x1,0,x2,H], fill=cols["P2"])
-    if x3>x2: zdraw.rectangle([x2,0,x3,H], fill=cols["P1"])
-    if x4>x3: zdraw.rectangle([x3,0,x4,H], fill=cols["BD"])
+    
+    # Colores semitransparentes de zonas
+    cols = {"SHOULDER": (255,255,0,70), "LANE2": (0,200,255,70), "LANE1": (255,150,255,70)}
+    if x1>x0: zdraw.rectangle([x0,0,x1,H], fill=cols["SHOULDER"])
+    if x2>x1: zdraw.rectangle([x1,0,x2,H], fill=cols["LANE2"])
+    if x3>x2: zdraw.rectangle([x2,0,x3,H], fill=cols["LANE1"])
+    if x4>x3: zdraw.rectangle([x3,0,x4,H], fill=cols["SHOULDER"])
+    
+    # Wheel Paths (Huellas)
     for h in [hp2, hp1]:
         if h[1]>h[0]: zdraw.rectangle([h[0],0,h[1],H], fill=(255,0,0,100))
         if h[3]>h[2]: zdraw.rectangle([h[2],0,h[3],H], fill=(255,0,0,100))
+
     crack_ov = np.zeros((H, W, 4), dtype=np.uint8)
     for _, r in df_comp.iterrows():
         crack_ov[labels == r["id"]] = COLOR_MAP.get(r["clase"], (0,0,0,160))
+    
     out = Image.alpha_composite(base, zone_ov)
     out = Image.alpha_composite(out, Image.fromarray(crack_ov))
     draw = ImageDraw.Draw(out)
     try: font = ImageFont.truetype("DejaVuSans.ttf", 14)
     except: font = ImageFont.load_default()
+
     for _, r in df_comp.iterrows():
         txt = f"{r['clase'][0].upper()}: {r['metros']:.2f}m"
         draw.rectangle([r['x']-2, r['y']-2, r['x']+80, r['y']+14], fill=(255,255,255,200))
         draw.text((r['x'], r['y']), txt, fill=(0,0,0,255), font=font)
     return out.convert("RGB")
 
-# --- LÓGICA APP ---
+# --- APP ---
 if 'data' not in st.session_state:
     st.session_state.data = None
 
-st.sidebar.title("Navegación")
-mode = st.sidebar.radio("Ir a:", ["Carga iPad", "Vista Resultados"])
+st.sidebar.title("Navigation")
+mode = st.sidebar.radio("Go to:", ["Field Upload", "Results Monitor"])
 
-if mode == "Carga iPad":
-    st.title("📤 Carga de Monografía")
-    up = st.file_uploader("Subir imagen", type=["jpg", "png", "jpeg"])
-    if up and st.button("🚀 PROCESAR IMAGEN"):
-        with st.spinner('Analizando...'):
+if mode == "Field Upload":
+    st.title("📤 Road Data Input")
+    up = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
+    if up and st.button("🚀 PROCESS IMAGE"):
+        with st.spinner('Analyzing infrastructure...'):
             img = Image.open(up).convert("RGB")
             arr = np.array(img)
             mask = yellow_mask_rgb_hsv(arr)
@@ -139,36 +158,34 @@ if mode == "Carga iPad":
                 rows.append({"id":i, "clase":clase, "metros":Lm, "x":xc, "y":yc})
                 mask_c = (labels == i)
                 ratio_h = np.sum(z_map[mask_c] == 4) / np.sum(mask_c)
-                z_final = "Huella" if ratio_h >= HUELLA_MIN_FRAC else zona
-                prorr.append({"Zona": z_final, "Clase": clase, "Metros": Lm})
+                
+                # Traducción del prorrateo a Wheel Path
+                z_final = "Wheel Path" if ratio_h >= HUELLA_MIN_FRAC else zona
+                prorr.append({"Zone": z_final, "Type": clase, "Meters": Lm})
 
-            # VALIDACIÓN ANTI-ERROR: Solo agrupar si hay datos detectados
             if len(prorr) > 0:
-                df_p = pd.DataFrame(prorr).groupby(["Zona", "Clase"])["Metros"].sum().reset_index()
+                df_p = pd.DataFrame(prorr).groupby(["Zone", "Type"])["Meters"].sum().reset_index()
             else:
-                df_p = pd.DataFrame(columns=["Zona", "Clase", "Metros"])
+                df_p = pd.DataFrame(columns=["Zone", "Type", "Meters"])
 
             st.session_state.data = {
                 "orig": img, 
                 "proc": annotate_image_final(img, labels, pd.DataFrame(rows)) if len(rows) > 0 else img, 
                 "res": df_p
             }
-            
-            if len(prorr) == 0:
-                st.warning("⚠️ No se detectaron fallas. Revisa el color de los trazos.")
-            else:
-                st.success("Imagen procesada.")
+            if len(prorr) == 0: st.warning("No distress detected.")
+            else: st.success("Processing complete.")
 
 else:
-    st.title("📊 Análisis con Zoom")
+    st.title("📊 Analysis Results")
     if st.session_state.data:
-        st.info("💡 **TIP:** Pasa el mouse sobre la imagen derecha para ampliar detalles.")
-        c1, c2 = st.columns([1, 1])
+        st.info("💡 **TIP:** Hover over the right image to zoom into distress details.")
+        c1, c2 = st.columns(2)
         with c1:
             st.subheader("Original")
             st.image(st.session_state.data["orig"], use_container_width=True)
         with c2:
-            st.subheader("Procesada (Zoom)")
+            st.subheader("Distress Map (Interactive Zoom)")
             img_b64 = get_image_download_link(st.session_state.data["proc"])
             zoom_html = f"""
             <div style="overflow: hidden; border: 1px solid #444; border-radius: 10px;">
@@ -182,10 +199,10 @@ else:
             st.components.v1.html(zoom_html, height=600)
         
         st.divider()
-        st.subheader("📋 Resumen de Hallazgos")
+        st.subheader("📋 Calculation Summary (English)")
+        # La tabla ahora usa Lane 1, Lane 2, Shoulder y Wheel Path
         st.dataframe(st.session_state.data["res"], use_container_width=True)
-        if st.button("🗑️ LIMPIAR"):
+        
+        if st.button("🗑️ CLEAR DATA"):
             st.session_state.data = None
             st.rerun()
-    else:
-        st.info("Cargue una imagen primero.")
