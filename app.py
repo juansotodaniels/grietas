@@ -12,12 +12,12 @@ st.set_page_config(layout="wide", page_title="Analizador de Pavimentos - Pro")
 
 # --- CONSTANTES TÉCNICAS (Calibradas para 2550px) ---
 W_OBJETIVO = 2550
-CENTER_OFFSET = 240 # Determina el eje central en el píxel 1515
+CENTER_OFFSET = 240 # Eje central en el píxel 1515: (2550/2) + 240
 PINK_LEFT_OFFSET, PINK_RIGHT_OFFSET = 340, 620
 
 ANCHO_BERMA, ANCHO_PISTA, ANCHO_TOTAL = 2.0, 3.5, 11.0 
 ANG_TOL = 20.0
-EJE_TOL_M = 0.05  # CAMBIO: Tolerancia estricta de 5cm para evitar falsos On Axis
+EJE_TOL_M = 0.05  # Tolerancia de 5cm respecto al eje
 HUELLA_MIN_FRAC = 0.75
 
 # ESCALAS CALIBRADAS
@@ -52,7 +52,7 @@ def compute_zone_bounds(W):
     x_center_shifted = (W / 2.0) + CENTER_OFFSET
     x1 = int(round(max(0, min(W, x_center_shifted - PINK_LEFT_OFFSET))))
     x3 = int(round(max(0, min(W, x_center_shifted + PINK_RIGHT_OFFSET))))
-    x2 = int(round(x_center_shifted)) # El eje divisorio real (1515px)
+    x2 = int(round(x_center_shifted)) 
     
     def get_h(center_p, off, width, x_min, x_max):
         c = center_p + off
@@ -71,21 +71,22 @@ def classify_component(xs, ys, W):
     major = evecs[:, np.argmax(evals)]
     ang = abs(np.degrees(np.arctan2(major[1], major[0]))) % 180.0
     
-    # Obtener límites exactos incluyendo x2 (centro absoluto)
     (x0, x1, x2, x3, x4), _, _ = compute_zone_bounds(W)
     
+    # Determinación de zona por centroide
     if x_c < x1: zona = "Left Shoulder"
     elif x_c < x2: zona = "Lane 2"
     elif x_c < x3: zona = "Lane 1"
     else: zona = "Right Shoulder"
     
-    # CAMBIO CRÍTICO: Cálculo de distancia basado estrictamente en el límite x2 (Eje Central)
-    dist_min_px = np.min(np.abs(xs - x2))
-    dist_min_m = float(dist_min_px) * S_LONGITUDINAL
+    # REFUERZO DE LÓGICA: Distancia del centro de la masa al píxel 1515 (x2)
+    dist_al_eje_px = abs(x_c - x2)
+    dist_al_eje_m = float(dist_al_eje_px) * S_LONGITUDINAL
 
     if abs(ang - 90.0) <= ANG_TOL:
-        # Solo On Axis si está a menos de 5cm del eje central real
-        clase = "On Axis" if dist_min_m <= EJE_TOL_M else "Longitudinal"
+        # Si la línea está en el píxel 1843, dist_al_eje_m será ~24 metros. 
+        # 24m > 0.05m, por lo tanto será "Longitudinal".
+        clase = "On Axis" if dist_al_eje_m <= EJE_TOL_M else "Longitudinal"
     elif (ang <= ANG_TOL) or (ang >= 180.0 - ANG_TOL):
         clase = "Transverse"
     else:
@@ -177,7 +178,7 @@ if mode == "Carga de Datos":
                 "proc": annotate_image_final(img, labels, pd.DataFrame(rows)) if rows else img, 
                 "res": df_p
             }
-            st.success("Procesamiento completo. Imagen normalizada y calibrada.")
+            st.success("Análisis finalizado con éxito.")
 
 else:
     st.title("📊 Resultados del Análisis")
