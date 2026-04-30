@@ -12,7 +12,7 @@ st.set_page_config(layout="wide", page_title="Analizador de Pavimentos - Pro")
 
 # --- CONSTANTES TÉCNICAS (Calibradas para 2550px) ---
 W_OBJETIVO = 2550
-CENTER_OFFSET = 240 # Eje central en el píxel 1515: (2550/2) + 240
+CENTER_OFFSET = 120 # Eje central en el píxel 1515: (2550/2) + 240
 PINK_LEFT_OFFSET, PINK_RIGHT_OFFSET = 340, 620
 
 ANCHO_BERMA, ANCHO_PISTA, ANCHO_TOTAL = 2.0, 3.5, 11.0 
