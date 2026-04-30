@@ -10,10 +10,15 @@ import base64
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(layout="wide", page_title="Analizador de Pavimentos - Pro")
 
-# --- CONSTANTES TÉCNICAS (Calibradas para 2550px) ---
+# --- AJUSTE DE CONSTANTES ---
 W_OBJETIVO = 2550
-CENTER_OFFSET = 120 # Eje central en el píxel 1515: (2550/2) + 240
-PINK_LEFT_OFFSET, PINK_RIGHT_OFFSET = 340, 620
+CENTER_OFFSET = 240         # Esto mantiene el eje en el píxel 1515
+ANCHO_PISTA_PX = 467        # Este valor es el ancho de "Lane 1" y "Lane 2" en píxeles
+
+# Eliminamos los valores fijos anteriores y los hacemos iguales
+PINK_LEFT_OFFSET = ANCHO_PISTA_PX  
+PINK_RIGHT_OFFSET = ANCHO_PISTA_PX
+
 
 ANCHO_BERMA, ANCHO_PISTA, ANCHO_TOTAL = 2.0, 3.5, 11.0 
 ANG_TOL = 20.0
@@ -49,19 +54,29 @@ def yellow_mask_rgb_hsv(arr):
     return mask
 
 def compute_zone_bounds(W):
+    # Calculamos el eje central exacto (1515 px)
     x_center_shifted = (W / 2.0) + CENTER_OFFSET
-    x1 = int(round(max(0, min(W, x_center_shifted - PINK_LEFT_OFFSET))))
-    x3 = int(round(max(0, min(W, x_center_shifted + PINK_RIGHT_OFFSET))))
-    x2 = int(round(x_center_shifted)) 
+    x2 = int(round(x_center_shifted))
     
+    # x1 es el borde izquierdo de Lane 2 (donde termina la berma izquierda)
+    x1 = int(round(max(0, x2 - PINK_LEFT_OFFSET)))
+    
+    # x3 es el borde derecho de Lane 1 (donde empieza la berma derecha)
+    x3 = int(round(min(W, x2 + PINK_RIGHT_OFFSET)))
+    
+    # x0 y x4 son los límites laterales de la imagen
+    x0, x4 = 0, W
+    
+    # Lógica para posicionar las huellas (Wheel Paths) en el centro de cada carril
     def get_h(center_p, off, width, x_min, x_max):
         c = center_p + off
         return int(round(max(x_min, min(x_max, c - width/2.0)))), int(round(max(x_min, min(x_max, c + width/2.0))))
     
+    # h_p2 para Lane 2 (Izquierda) y h_p1 para Lane 1 (Derecha)
     h_p2 = (*get_h((x1+x2)/2.0, -100, 100, x1, x2), *get_h((x1+x2)/2.0, 100, 85, x1, x2))
     h_p1 = (*get_h((x2+x3)/2.0, -120, 100, x2, x3), *get_h((x2+x3)/2.0, 120, 100, x2, x3))
-    return (0, x1, x2, x3, W), h_p2, h_p1
-
+    
+    return (x0, x1, x2, x3, x4), h_p2, h_p1
 def classify_component(xs, ys, W):
     x_c, y_c = xs.mean(), ys.mean()
     Xpx = np.vstack([xs - x_c, ys - y_c])
