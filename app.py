@@ -76,12 +76,14 @@ def classify_component(xs, ys, W):
     elif x_c < x3: zona = "Lane 1"
     else: zona = "Right Shoulder"
     
-    # UNIFICADO: El eje de clasificación es exactamente x2 (el centro calibrado)
+    # UNIFICADO: Clasificación basada en la ubicación del centro de la grieta (x_c)
     x_p2_eje = x2
-    dist_min_m = float(np.min(np.abs(xs - x_p2_eje))) * S_LONGITUDINAL
+    # Usamos x_c (promedio) en lugar del mínimo para evitar errores por píxeles aislados
+    dist_centroide_m = abs(x_c - x_p2_eje) * S_LONGITUDINAL
 
     if abs(ang - 90.0) <= ANG_TOL:
-        clase = "On Axis" if dist_min_m <= EJE_TOL_M else "Longitudinal"
+        # Ahora comparará la distancia del cuerpo principal (1900px) contra el eje (1515px)
+        clase = "On Axis" if dist_centroide_m <= EJE_TOL_M else "Longitudinal"
     elif (ang <= ANG_TOL) or (ang >= 180.0 - ANG_TOL):
         clase = "Transverse"
     else:
