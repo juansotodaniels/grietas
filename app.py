@@ -12,17 +12,20 @@ st.set_page_config(layout="wide", page_title="Analizador de Pavimentos - Pro")
 
 # --- AJUSTE DE CONSTANTES ---
 W_OBJETIVO = 2550
-CENTER_OFFSET = 240         # Esto mantiene el eje en el píxel 1515
-ANCHO_PISTA_PX = 467        # Este valor es el ancho de "Lane 1" y "Lane 2" en píxeles
+CENTER_OFFSET = 240         # Mantiene el eje en el píxel 1515
+ANCHO_PISTA_PX = 467        # Ancho de las pistas en píxeles
 
-# Eliminamos los valores fijos anteriores y los hacemos iguales
+# Configuración simétrica de pistas
 PINK_LEFT_OFFSET = ANCHO_PISTA_PX  
 PINK_RIGHT_OFFSET = ANCHO_PISTA_PX
 
+# NUEVAS CONSTANTES PARA SIMETRÍA DE HUELLAS (Wheel Paths)
+WP_OFFSET = 110             # Distancia desde el centro del carril a la huella
+WP_WIDTH = 95               # Ancho de la franja roja de la huella
 
 ANCHO_BERMA, ANCHO_PISTA, ANCHO_TOTAL = 2.0, 3.5, 11.0 
 ANG_TOL = 20.0
-EJE_TOL_M = 0.05  # Tolerancia de 5cm respecto al eje
+EJE_TOL_M = 0.05            # Tolerancia de 5cm respecto al eje
 HUELLA_MIN_FRAC = 0.75
 
 # ESCALAS CALIBRADAS
@@ -54,29 +57,30 @@ def yellow_mask_rgb_hsv(arr):
     return mask
 
 def compute_zone_bounds(W):
-    # Calculamos el eje central exacto (1515 px)
+    # Eje central exacto (1515 px)
     x_center_shifted = (W / 2.0) + CENTER_OFFSET
     x2 = int(round(x_center_shifted))
     
-    # x1 es el borde izquierdo de Lane 2 (donde termina la berma izquierda)
+    # Límites de carriles
     x1 = int(round(max(0, x2 - PINK_LEFT_OFFSET)))
-    
-    # x3 es el borde derecho de Lane 1 (donde empieza la berma derecha)
     x3 = int(round(min(W, x2 + PINK_RIGHT_OFFSET)))
-    
-    # x0 y x4 son los límites laterales de la imagen
     x0, x4 = 0, W
     
-    # Lógica para posicionar las huellas (Wheel Paths) en el centro de cada carril
+    # Función interna para calcular coordenadas de huellas
     def get_h(center_p, off, width, x_min, x_max):
         c = center_p + off
         return int(round(max(x_min, min(x_max, c - width/2.0)))), int(round(max(x_min, min(x_max, c + width/2.0))))
     
-    # h_p2 para Lane 2 (Izquierda) y h_p1 para Lane 1 (Derecha)
-    h_p2 = (*get_h((x1+x2)/2.0, -100, 100, x1, x2), *get_h((x1+x2)/2.0, 100, 85, x1, x2))
-    h_p1 = (*get_h((x2+x3)/2.0, -120, 100, x2, x3), *get_h((x2+x3)/2.0, 120, 100, x2, x3))
+    # Centros de carril para simetría
+    c_lane2 = (x1 + x2) / 2.0
+    c_lane1 = (x2 + x3) / 2.0
+    
+    # Huellas simétricas usando constantes WP_OFFSET y WP_WIDTH
+    h_p2 = (*get_h(c_lane2, -WP_OFFSET, WP_WIDTH, x1, x2), *get_h(c_lane2, WP_OFFSET, WP_WIDTH, x1, x2))
+    h_p1 = (*get_h(c_lane1, -WP_OFFSET, WP_WIDTH, x2, x3), *get_h(c_lane1, WP_OFFSET, WP_WIDTH, x2, x3))
     
     return (x0, x1, x2, x3, x4), h_p2, h_p1
+
 def classify_component(xs, ys, W):
     x_c, y_c = xs.mean(), ys.mean()
     Xpx = np.vstack([xs - x_c, ys - y_c])
@@ -88,19 +92,15 @@ def classify_component(xs, ys, W):
     
     (x0, x1, x2, x3, x4), _, _ = compute_zone_bounds(W)
     
-    # Determinación de zona por centroide
     if x_c < x1: zona = "Left Shoulder"
     elif x_c < x2: zona = "Lane 2"
     elif x_c < x3: zona = "Lane 1"
     else: zona = "Right Shoulder"
     
-    # REFUERZO DE LÓGICA: Distancia del centro de la masa al píxel 1515 (x2)
     dist_al_eje_px = abs(x_c - x2)
     dist_al_eje_m = float(dist_al_eje_px) * S_LONGITUDINAL
 
     if abs(ang - 90.0) <= ANG_TOL:
-        # Si la línea está en el píxel 1843, dist_al_eje_m será ~24 metros. 
-        # 24m > 0.05m, por lo tanto será "Longitudinal".
         clase = "On Axis" if dist_al_eje_m <= EJE_TOL_M else "Longitudinal"
     elif (ang <= ANG_TOL) or (ang >= 180.0 - ANG_TOL):
         clase = "Transverse"
@@ -118,14 +118,17 @@ def annotate_image_final(img_pil, labels, df_comp):
     (x0, x1, x2, x3, x4), hp2, hp1 = compute_zone_bounds(W)
     
     cols = {"SHOULDER": (255,255,0,70), "LANE2": (0,200,255,70), "LANE1": (255,150,255,70)}
-    zdraw.rectangle([x0,0,x1,H], fill=cols["SHOULDER"])
-    zdraw.rectangle([x1,0,x2,H], fill=cols["LANE2"])
-    zdraw.rectangle([x2,0,x3,H], fill=cols["LANE1"])
-    zdraw.rectangle([x3,0,x4,H], fill=cols["SHOULDER"])
     
+    # Dibujo de zonas principales
+    zdraw.rectangle([x0, 0, x1, H], fill=cols["SHOULDER"])
+    zdraw.rectangle([x1, 0, x2, H], fill=cols["LANE2"])
+    zdraw.rectangle([x2, 0, x3, H], fill=cols["LANE1"])
+    zdraw.rectangle([x3, 0, x4, H], fill=cols["SHOULDER"])
+    
+    # Dibujo de huellas simétricas
     for h in [hp2, hp1]:
-        if h[1]>h[0]: zdraw.rectangle([h[0],0,h[1],H], fill=(255,0,0,100))
-        if h[3]>h[2]: zdraw.rectangle([h[2],0,h[3],H], fill=(255,0,0,100))
+        if h[1] > h[0]: zdraw.rectangle([h[0], 0, h[1], H], fill=(255, 0, 0, 100))
+        if h[3] > h[2]: zdraw.rectangle([h[2], 0, h[3], H], fill=(255, 0, 0, 100))
 
     crack_ov = np.zeros((H, W, 4), dtype=np.uint8)
     for _, r in df_comp.iterrows():
@@ -151,7 +154,7 @@ st.sidebar.title("Navegación")
 mode = st.sidebar.radio("Ir a:", ["Carga de Datos", "Monitor de Resultados"])
 
 if mode == "Carga de Datos":
-    st.title("📤 Entrada de Datos Vial (2550px)")
+    st.title("📤 Entrada de Datos Vial (Simetría Calibrada)")
     up = st.file_uploader("Subir imagen", type=["jpg", "png", "jpeg"])
     if up and st.button("🚀 PROCESAR IMAGEN"):
         with st.spinner('Analizando infraestructura...'):
@@ -168,6 +171,8 @@ if mode == "Carga de Datos":
             z_map = np.full(arr.shape[:2], -1)
             (x0,x1,x2,x3,x4), hp2, hp1 = compute_zone_bounds(W_OBJETIVO)
             z_map[:, x0:x1], z_map[:, x1:x2], z_map[:, x2:x3], z_map[:, x3:x4] = 0, 1, 2, 3
+            
+            # Mapeo de zonas de huella para prorrateo
             for h in [hp2, hp1]:
                 if h[1]>h[0]: z_map[:, h[0]:h[1]] = 4
                 if h[3]>h[2]: z_map[:, h[2]:h[3]] = 4
@@ -200,10 +205,10 @@ else:
     if st.session_state.data:
         c1, c2 = st.columns(2)
         with c1:
-            st.subheader("Original Re-escalada")
+            st.subheader("Imagen Original")
             st.image(st.session_state.data["orig"], use_container_width=True)
         with c2:
-            st.subheader("Mapa de Deterioros")
+            st.subheader("Detección y Clasificación")
             img_b64 = get_image_download_link(st.session_state.data["proc"])
             zoom_html = f"""
             <div style="overflow: hidden; border: 1px solid #444; border-radius: 10px;">
